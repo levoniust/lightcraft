@@ -54,6 +54,19 @@ impl<'a> EncodeImage<'a> {
     fn has_alpha(&self) -> bool {
         self.channels == 2 || self.channels == 4
     }
+
+    /// `s` (these samples) with the alpha channel left out when every pixel is fully opaque (`max`), and the channel
+    /// count that is left. A flattened render is written as RGB (or gray): the file is smaller and reads the same
+    /// everywhere. Some transparency, or no alpha channel, keeps the samples as they are.
+    fn opaque_samples<'s, T: Copy + PartialEq>(&self, s: &'s [T], max: T) -> (std::borrow::Cow<'s, [T]>, u8) {
+        let ch = self.channels as usize;
+        let n = self.width as usize * self.height as usize;
+        let px = || s.chunks_exact(ch).take(n);
+        if !self.has_alpha() || !px().all(|c| c.last() == Some(&max)) {
+            return (s.get(..n * ch).unwrap_or(s).into(), self.channels);
+        }
+        (px().flat_map(|c| c.get(..ch - 1).unwrap_or_default().iter().copied()).collect::<Vec<T>>().into(), self.channels - 1)
+    }
 }
 
 /// Metadata to embed.
@@ -176,17 +189,23 @@ pub fn encode_jpeg(img: &EncodeImage, quality: u8, subsampling: ChromaSubsamplin
     Ok(out)
 }
 
-/// Encode PNG (8- or 16-bit; float input is rejected — quantize first).
+/// Encode PNG (8- or 16-bit; float input is rejected — quantize first). An alpha channel that is opaque
+/// everywhere is left out (an RGB or gray PNG).
 pub fn encode_png(img: &EncodeImage, meta: &EncodeMeta) -> Result<Vec<u8>> {
     img.validate()?;
-    let n = img.width as usize * img.height as usize * img.channels as usize;
-    let (bytes, depth): (Vec<u8>, png::BitDepth) = match img.samples {
-        Samples::U8(s) => (s[..n].to_vec(), png::BitDepth::Eight),
-        Samples::U16(s) => (s[..n].iter().flat_map(|v| v.to_be_bytes()).collect(), png::BitDepth::Sixteen),
+    let (bytes, depth, channels): (Vec<u8>, png::BitDepth, u8) = match img.samples {
+        Samples::U8(s) => {
+            let (s, ch) = img.opaque_samples(s, u8::MAX);
+            (s.into_owned(), png::BitDepth::Eight, ch)
+        }
+        Samples::U16(s) => {
+            let (s, ch) = img.opaque_samples(s, u16::MAX);
+            (s.iter().flat_map(|v| v.to_be_bytes()).collect(), png::BitDepth::Sixteen, ch)
+        }
         Samples::F32(_) => return Err(Error::Encode("PNG needs 8- or 16-bit samples".into())),
     };
     let mut info = png::Info::with_size(img.width, img.height);
-    info.color_type = match img.channels {
+    info.color_type = match channels {
         1 => png::ColorType::Grayscale,
         2 => png::ColorType::GrayscaleAlpha,
         3 => png::ColorType::Rgb,
@@ -224,8 +243,9 @@ pub enum TiffCompression {
     PackBits,
 }
 
-/// Encode TIFF: 8/16-bit integer or 32-bit float, gray/RGB with optional (unassociated) alpha.
-/// ICC and XMP are embedded; EXIF is not (write it through the TIFF writer in `lightcraft-tiff`).
+/// Encode TIFF: 8/16-bit integer or 32-bit float, gray/RGB with optional (unassociated) alpha; an alpha channel
+/// that is opaque everywhere is left out. ICC and XMP are embedded; EXIF is not (write it through the TIFF writer
+/// in `lightcraft-tiff`).
 pub fn encode_tiff(img: &EncodeImage, compression: TiffCompression, meta: &EncodeMeta) -> Result<Vec<u8>> {
     use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
     use tiff::tags::Predictor;
@@ -245,7 +265,6 @@ pub fn encode_tiff(img: &EncodeImage, compression: TiffCompression, meta: &Encod
     let (w, h) = (img.width, img.height);
     let n = w as usize * h as usize;
     // Gray + alpha is stored as RGBA (the encoder has no GrayA colour type).
-    let ch = img.channels as usize;
 
     macro_rules! write {
         ($ct:ty, $data:expr, $alpha:expr) => {{
@@ -269,23 +288,23 @@ pub fn encode_tiff(img: &EncodeImage, compression: TiffCompression, meta: &Encod
         s.as_chunks::<2>().0.iter().take(n).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect()
     }
     match img.samples {
-        Samples::U8(s) => match ch {
-            1 => write!(colortype::Gray8, &s[..n], false),
-            2 => write!(colortype::RGBA8, &expand_ga(s, n), true),
-            3 => write!(colortype::RGB8, &s[..n * 3], false),
-            _ => write!(colortype::RGBA8, &s[..n * 4], true),
+        Samples::U8(s) => match img.opaque_samples(s, u8::MAX) {
+            (s, 1) => write!(colortype::Gray8, &s[..n], false),
+            (s, 2) => write!(colortype::RGBA8, &expand_ga(&s, n), true),
+            (s, 3) => write!(colortype::RGB8, &s[..n * 3], false),
+            (s, _) => write!(colortype::RGBA8, &s[..n * 4], true),
         },
-        Samples::U16(s) => match ch {
-            1 => write!(colortype::Gray16, &s[..n], false),
-            2 => write!(colortype::RGBA16, &expand_ga(s, n), true),
-            3 => write!(colortype::RGB16, &s[..n * 3], false),
-            _ => write!(colortype::RGBA16, &s[..n * 4], true),
+        Samples::U16(s) => match img.opaque_samples(s, u16::MAX) {
+            (s, 1) => write!(colortype::Gray16, &s[..n], false),
+            (s, 2) => write!(colortype::RGBA16, &expand_ga(&s, n), true),
+            (s, 3) => write!(colortype::RGB16, &s[..n * 3], false),
+            (s, _) => write!(colortype::RGBA16, &s[..n * 4], true),
         },
-        Samples::F32(s) => match ch {
-            1 => write!(colortype::Gray32Float, &s[..n], false),
-            2 => write!(colortype::RGBA32Float, &expand_ga(s, n), true),
-            3 => write!(colortype::RGB32Float, &s[..n * 3], false),
-            _ => write!(colortype::RGBA32Float, &s[..n * 4], true),
+        Samples::F32(s) => match img.opaque_samples(s, 1.0) {
+            (s, 1) => write!(colortype::Gray32Float, &s[..n], false),
+            (s, 2) => write!(colortype::RGBA32Float, &expand_ga(&s, n), true),
+            (s, 3) => write!(colortype::RGB32Float, &s[..n * 3], false),
+            (s, _) => write!(colortype::RGBA32Float, &s[..n * 4], true),
         },
     }
     Ok(cur.into_inner())

@@ -103,7 +103,7 @@ fn png_8_and_16_bit_exact() {
     let img = gradient(33, 17);
     let bytes = encode_png(&EncodeImage::rgba8(&img), &EncodeMeta::default()).unwrap();
     let d = decode(&bytes, DecodeOptions::default()).unwrap();
-    assert!(d.has_alpha);
+    assert!(!d.has_alpha, "an opaque image is written without alpha");
     assert_eq!(d.bit_depth, 8);
     assert_eq!(d.to_srgb8(), img);
 
@@ -124,6 +124,45 @@ fn png_8_and_16_bit_exact() {
     let bytes = encode_png(&EncodeImage::new(2, 1, 3, Samples::U16(&data)), &EncodeMeta::default()).unwrap();
     let d = decode(&bytes, DecodeOptions::default()).unwrap();
     assert!(d.image.get(1, 0)[0] > d.image.get(0, 0)[0]);
+}
+
+/// Issue #1952: a flattened render (alpha 255 everywhere) is written as an RGB PNG / TIFF, not RGBA. One pixel that
+/// is not opaque keeps the alpha channel.
+#[test]
+fn opaque_alpha_is_left_out_of_png_and_tiff() {
+    let png_color_type = |b: &[u8]| b[25]; // IHDR: signature, length, type, width, height, bit depth, colour type
+    let img = gradient(64, 32);
+    let rgba = encode_png(&EncodeImage::rgba8(&img), &EncodeMeta::default()).unwrap();
+    assert_eq!(png_color_type(&rgba), 2, "RGB");
+    let mut cut = img.clone();
+    cut.data[5][3] = 254;
+    let kept = encode_png(&EncodeImage::rgba8(&cut), &EncodeMeta::default()).unwrap();
+    assert_eq!(png_color_type(&kept), 6, "RGBA");
+    let d = decode(&kept, DecodeOptions::default()).unwrap();
+    assert!(d.has_alpha && (d.alpha.as_ref().unwrap().data[5] - 254.0 / 255.0).abs() < 1e-6);
+    assert!(rgba.len() < kept.len(), "{} vs {}", rgba.len(), kept.len());
+    // gray + opaque alpha, and 16-bit
+    let ga: Vec<u8> = (0..20).flat_map(|i| [i as u8 * 10, 255]).collect();
+    assert_eq!(png_color_type(&encode_png(&EncodeImage::new(5, 4, 2, Samples::U8(&ga)), &EncodeMeta::default()).unwrap()), 0, "gray");
+    let deep: Vec<u16> = (0..20u16).flat_map(|i| [i * 3000, i * 2000, i * 1000, u16::MAX]).collect();
+    let b = encode_png(&EncodeImage::new(5, 4, 4, Samples::U16(&deep)), &EncodeMeta::default()).unwrap();
+    assert_eq!((png_color_type(&b), b[24]), (2, 16));
+    let d = decode(&b, DecodeOptions::default()).unwrap();
+    assert!(!d.has_alpha);
+    assert!((d.image.get(4, 3)[0] - Trc::Srgb.to_linear(19.0 * 3000.0 / 65535.0)).abs() < 1e-6);
+
+    for comp in [TiffCompression::None, TiffCompression::Deflate] {
+        let rgba: Vec<u8> = img.data.iter().flatten().copied().collect();
+        let t = encode_tiff(&EncodeImage::new(64, 32, 4, Samples::U8(&rgba)), comp, &EncodeMeta::default()).unwrap();
+        let d = decode(&t, DecodeOptions::default()).unwrap();
+        assert!(!d.has_alpha);
+        assert_eq!(d.to_srgb8(), img);
+        let f: Vec<f32> = (0..20).flat_map(|i| [i as f32 / 10.0, 0.5, 2.0, 1.0]).collect();
+        let d = decode(&encode_tiff(&EncodeImage::new(5, 4, 4, Samples::F32(&f)), comp, &EncodeMeta::default()).unwrap(), DecodeOptions::default())
+            .unwrap();
+        assert!(d.float && !d.has_alpha);
+        assert_eq!(d.image.get(4, 3), [1.9, 0.5, 2.0]);
+    }
 }
 
 #[test]
