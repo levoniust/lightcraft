@@ -17,12 +17,14 @@ pub const MAX_CHARS: usize = 4000;
 
 /// The text faces: Inter first, then the craft-fonts CJK faces (Mincho first, the watermark's
 /// serif look; then any other CJK face — drawn text has no UI language, so every CJK script is
-/// offered). Without craft-fonts that is Inter alone, and CJK characters draw as Inter's
-/// missing-glyph box.
+/// offered), then the faces of the other non-Latin scripts the UI falls back on (Thai, Arabic, ...;
+/// bold first, nearest Inter SemiBold; #2052). Without craft-fonts that is Inter alone, and
+/// characters of those scripts draw as Inter's missing-glyph box.
 pub fn faces(craft: &'static [crate::fonts::CraftFont]) -> Vec<FontRef<'static>> {
     let mut cjk: Vec<_> = crate::fonts::cjk(craft).collect();
     cjk.sort_by_key(|f| !f.is_mincho());
-    std::iter::once(TEXT_FONT).chain(cjk.into_iter().map(|f| f.bytes)).filter_map(|bytes| FontRef::try_from_slice(bytes).ok()).collect()
+    let others = crate::fonts::other_scripts(craft, "Bold");
+    std::iter::once(TEXT_FONT).chain(cjk.into_iter().chain(others).map(|f| f.bytes)).filter_map(|bytes| FontRef::try_from_slice(bytes).ok()).collect()
 }
 
 /// Shape a whole grapheme in one cell. CJK uses vertical origins and forms; Latin stays upright.
@@ -221,5 +223,34 @@ impl TextLayout {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Thai and Arabic text (watermarks, contact-sheet captions of file names) draws with the
+    /// craft-fonts face of its script, not Inter's missing-glyph box (#2052).
+    #[test]
+    fn other_scripts_draw_with_their_craft_fonts_face() {
+        for (script, text) in [("Thai", "สวัสดี"), ("Arab", "صورة")] {
+            if !crate::fonts::CRAFT_FONTS.iter().any(|f| f.covers(script)) {
+                lightcraft_testkit::skip!(Fonts, "built without a {script} face from craft-fonts");
+                continue;
+            }
+            let layout = TextLayout::new(text, 40.0, false, crate::fonts::CRAFT_FONTS).unwrap();
+            assert!(!layout.glyphs.is_empty(), "{script}");
+            for (face, glyph, _) in &layout.glyphs {
+                assert!(*face > 0, "{script}: {glyph:?} fell back to Inter");
+                assert_ne!(glyph.id.0, 0, "{script}: missing glyph");
+            }
+        }
+    }
+
+    /// Without craft-fonts the faces are Inter alone, as before.
+    #[test]
+    fn faces_without_craft_fonts_are_inter_alone() {
+        assert_eq!(faces(&[]).len(), 1);
     }
 }

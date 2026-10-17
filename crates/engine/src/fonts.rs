@@ -60,10 +60,16 @@ pub fn is_cjk_script(script: &str) -> bool {
 /// prefers `style`. Empty without craft-fonts.
 pub fn ui_fallback<'a>(fonts: &'a [CraftFont], script: &str, style: &str) -> Vec<&'a CraftFont> {
     let mut faces = cjk_fallback(fonts, script, style);
+    faces.extend(other_scripts(fonts, style));
+    faces
+}
+
+/// The craft-fonts faces for the non-Latin scripts that aren't CJK (Thai, Arabic, ...), those in
+/// `style` first. Empty without craft-fonts.
+pub fn other_scripts<'a>(fonts: &'a [CraftFont], style: &str) -> Vec<&'a CraftFont> {
     let mut others: Vec<&CraftFont> = fonts.iter().filter(|font| !covers_cjk(font) && font.scripts.iter().any(|s| *s != "Latn")).collect();
     others.sort_by_key(|font| font.style != style);
-    faces.extend(others);
-    faces
+    others
 }
 
 /// The CJK part of [`ui_fallback`], in the same preference order.
