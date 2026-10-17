@@ -39,7 +39,10 @@ jobs:
       - name: Job summary
         if: always()
         shell: bash
-        run: test -f target/ci/summary.md && cat target/ci/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          if [ -f target/ci/summary.md ]; then
+            cat target/ci/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   test:
     name: Tests (${{ matrix.os }})
