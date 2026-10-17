@@ -990,6 +990,17 @@ pub enum Dialog {
         params: serde_json::Value,
         key: String,
     },
+    /// New Folder on Disk… of a Folders row: a folder `name` inside `parent` (`folder.create`),
+    /// then, with `include_selected`, the selected photos moved into it (`photo.moveToFolder`;
+    /// Lightroom Classic's "Include selected photos", issue #2037). Off unless ticked: it moves
+    /// files on disk.
+    NewDiskFolder {
+        title: String,
+        parent: String,
+        name: String,
+        #[serde(default)]
+        include_selected: bool,
+    },
     /// Edit Capture Time: `mode` "set" (`time`; the others shift along), "shift" (by `days`,
     /// `hours`, `minutes`) or "zone" (time-zone shift by `zone` hours).
     CaptureTime {

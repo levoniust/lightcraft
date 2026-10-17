@@ -221,7 +221,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         confirm = true;
     }
     let title: String = match &dlg {
-        Dialog::TextPrompt { title, .. } => title.as_str(),
+        Dialog::TextPrompt { title, .. } | Dialog::NewDiskFolder { title, .. } => title.as_str(),
         Dialog::NewAlbum { folder: true, .. } => "Create Folder",
         Dialog::NewAlbum { .. } => "Create Album",
         Dialog::RenameAlbum { .. } => "Rename Album",
@@ -684,6 +684,19 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 Dialog::TextPrompt { value, hint, .. } => {
                     if dialog_field(ui, "field:prompt", value, hint) {
                         confirm = true;
+                    }
+                }
+                Dialog::NewDiskFolder { name, include_selected, .. } => {
+                    if dialog_field(ui, "field:prompt", name, "Folder name (created on disk)") {
+                        confirm = true;
+                    }
+                    // as in Lightroom Classic, the option is only there when something is selected
+                    if !app.session.selected().is_empty() {
+                        ui.add_space(6.0);
+                        let r = ui
+                            .checkbox(include_selected, crate::i18n::tr("Include selected photos"))
+                            .on_hover_text(crate::i18n::tr("Moves the files and their XMP sidecars into this folder; never overwrites"));
+                        crate::widgets::register(ui.ctx(), "check:folderIncludeSelected", r.rect);
                     }
                 }
                 Dialog::NewAlbum { name, folder, include_selected, .. } => {
@@ -1357,7 +1370,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::FaceModel { info, .. } if !informational && info["download"].is_string() => "Download",
                     Dialog::FaceModel { .. } if !informational => "Install",
                     Dialog::ConfirmDelete { .. } | Dialog::DeleteKeyword { .. } | Dialog::DeleteEffects { .. } => "Delete",
-                    Dialog::SaveEffect { .. } => "Create",
+                    Dialog::SaveEffect { .. } | Dialog::NewDiskFolder { .. } => "Create",
                     Dialog::MovePhotos { .. } => "Move",
                     // (not "Merge": that is photo merging, HDR / panorama, in some languages)
                     Dialog::MoveKeyword { .. } => "Merge Keywords",
@@ -1464,6 +1477,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         | Dialog::SlideshowExport { .. }
                         | Dialog::Print
                         | Dialog::NewAlbum { .. }
+                        | Dialog::NewDiskFolder { .. }
                         | Dialog::NewSmartAlbum { .. }
                         | Dialog::SmartRules { .. }
                         | Dialog::KeywordTag { .. }
@@ -1483,6 +1497,18 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             Ok(r) if matches!(dlg, Dialog::NewAlbum { .. }) && r.get("skipped").and_then(serde_json::Value::as_u64).is_some_and(|n| n > 0) => {
                 // albums hold library photos (issue #684): say which part of the selection stayed out
                 crate::panels::grid::toast_skipped(app, ctx, &r);
+                close = true;
+            }
+            // the folder is there: say how the move of the selected photos went, if one was asked for
+            Ok(r) if matches!(dlg, Dialog::NewDiskFolder { .. }) => {
+                if let Some(e) = r.get("moveError").and_then(serde_json::Value::as_str) {
+                    app.toast(ctx, e.to_string());
+                } else if let (Some(n), Some(name)) =
+                    (r.get("moved").and_then(serde_json::Value::as_u64), r.get("name").and_then(serde_json::Value::as_str))
+                {
+                    let text = crate::panels::left::moved_text(n, name);
+                    app.toast(ctx, text);
+                }
                 close = true;
             }
             // a move says how it went, or why nothing moved
@@ -1763,6 +1789,20 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
             let mut p = params.clone();
             p[key.as_str()] = json!(value.trim());
             app.run(command, p)
+        }
+        Dialog::NewDiskFolder { parent, name, include_selected, .. } => {
+            let name = name.trim();
+            let r = app.run("folder.create", json!({"parent": parent, "name": name}))?;
+            if !*include_selected || app.session.selected().is_empty() {
+                return Ok(r);
+            }
+            let Some(path) = r.get("path").and_then(serde_json::Value::as_str).map(str::to_string) else { return Ok(r) };
+            // two undo steps: Undo moves the photos back, a second one removes the empty folder
+            Ok(match crate::panels::left::move_photos(app, None, &path) {
+                Ok(n) => json!({"path": path, "name": name, "moved": n}),
+                // (the folder stays: it is in the tree, and Undo removes it)
+                Err(e) => json!({"path": path, "moveError": e}),
+            })
         }
         Dialog::CaptureTime { mode, time, days, hours, minutes, zone } => app.run(
             "photo.setCaptureTime",
