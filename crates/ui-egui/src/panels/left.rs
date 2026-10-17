@@ -749,25 +749,43 @@ fn date_rows(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     }
 }
 
+const MISSING_COUNT: &str = "missing-count";
+
+/// The [`missing_count`] check: its last count, whether it is running, and when and for which catalog revision it
+/// last started.
+#[derive(Clone, Default)]
+struct MissingJob {
+    n: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    at: f64,
+    rev: u64,
+}
+
+/// Is the Missing Photos count being worked out right now? Its row appears above Folders when the count lands, and
+/// the sidebar below it moves, so the headless driver waits for it as it does for [`fs_cached_running`].
+pub(crate) fn missing_count_running(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<MissingJob>(egui::Id::new(MISSING_COUNT))).is_some_and(|j| j.running.load(std::sync::atomic::Ordering::Acquire))
+}
+
+/// Marks the Missing Photos count as running (or done), as a check still on its worker thread would.
+#[cfg(test)]
+pub(crate) fn hold_missing_count(ctx: &egui::Context, running: bool) {
+    let job = MissingJob { running: std::sync::Arc::new(running.into()), at: f64::MAX, ..Default::default() };
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(MISSING_COUNT), job));
+}
+
 /// How many library photos have no file (Local browse records are not checked; see
 /// `cmd::missing::checked_path`). Checking stats every file, which on a network share takes
 /// seconds, so it runs on a worker thread: the count shown is the last finished one, refreshed
 /// at most every 5 s, and at once (after the running check) when the catalog changed.
 fn missing_count(app: &mut LightcraftApp, ui: &mut egui::Ui) -> usize {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-    #[derive(Clone, Default)]
-    struct Job {
-        n: std::sync::Arc<AtomicUsize>,
-        running: std::sync::Arc<AtomicBool>,
-        at: f64,
-        rev: u64,
-    }
-    let id = egui::Id::new("missing-count");
+    use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+    let id = egui::Id::new(MISSING_COUNT);
     let now = ui.input(|i| i.time);
     let rev = app.session.catalog.revision;
-    let mut job: Job = ui.data(|d| d.get_temp(id)).unwrap_or(Job { rev: u64::MAX, at: f64::MIN, ..Default::default() });
+    let mut job: MissingJob = ui.data(|d| d.get_temp(id)).unwrap_or(MissingJob { rev: u64::MAX, at: f64::MIN, ..Default::default() });
     let fresh = now - job.at < 5.0 && job.rev == rev;
-    if !fresh && !job.running.load(Relaxed) {
+    if !fresh && !job.running.load(Acquire) {
         // the same scope as the Missing Photos view: library photos only, never Local browse records
         let paths = lightcraft_engine::cmd::missing::candidates(&app.session.catalog);
         job.running.store(true, Relaxed);
@@ -777,7 +795,7 @@ fn missing_count(app: &mut LightcraftApp, ui: &mut egui::Ui) -> usize {
         let work = move || {
             let missing = if cfg!(target_arch = "wasm32") { 0 } else { paths.iter().filter(|p| !std::path::Path::new(p).exists()).count() };
             n.store(missing, Relaxed);
-            running.store(false, Relaxed);
+            running.store(false, Release);
             ctx.request_repaint();
         };
         #[cfg(not(target_arch = "wasm32"))]

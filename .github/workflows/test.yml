@@ -1,0 +1,58 @@
+# Tests on the main desktop platforms. Linux runs the full quality gate (`cargo xtask ci`: fmt,
+# clippy, tests, parity, layers, assets, wasm); macOS and Windows run the workspace tests.
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # debug info and incremental state are most of a debug target dir; CI needs neither
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  linux:
+    name: Linux (xtask ci)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@main
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask ci --summary-md
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f target/ci/summary.md ]; then
+            cat target/ci/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked --no-fail-fast

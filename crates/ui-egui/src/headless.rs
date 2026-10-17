@@ -348,11 +348,12 @@ impl Headless {
         }
     }
 
-    /// Is anything still in progress (renders, file-system checks the sidebar waits for, queued
-    /// input)?
+    /// Is anything still in progress (renders, file-system checks the sidebar waits for, such as the
+    /// Missing Photos count, queued input)?
     pub fn busy(&self) -> bool {
         self.app.renderer.in_flight() > 0
             || crate::panels::left::fs_cached_running(&self.view.ctx) > 0
+            || crate::panels::left::missing_count_running(&self.view.ctx)
             || self.app.merge.busy()
             || self.app.scan.is_some()
             || self.app.sync.is_some()
@@ -2093,6 +2094,21 @@ mod tests {
         assert!(h.settle(SETTLE));
         assert!(!h.busy());
         assert_eq!(check(&mut h), Some(true));
+    }
+
+    /// The Missing Photos count runs on a worker thread as well, and its row appears above Folders when
+    /// it lands: `busy()` counts it too (on a slow machine the row used to land between a test reading a
+    /// folder row's position and clicking it, so the click hit the folder above).
+    #[test]
+    fn settle_waits_for_the_missing_photos_count() {
+        let mut h = demo([800.0, 600.0]);
+        h.settle(SETTLE);
+        assert!(!h.busy());
+        crate::panels::left::hold_missing_count(&h.view.ctx, true);
+        assert!(h.busy(), "a running count is pending work");
+        crate::panels::left::hold_missing_count(&h.view.ctx, false);
+        assert!(h.settle(SETTLE));
+        assert!(!h.busy());
     }
 
     /// Photo > Rename Photos…: the dialog previews and renames the selection.
