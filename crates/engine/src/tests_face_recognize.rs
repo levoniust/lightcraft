@@ -401,6 +401,51 @@ fn many_faces_are_named_in_one_undo_step() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Issue #2019: false detections are removed from Unnamed faces, many at once, as one undo step; a photo left with no
+/// face box is not searched again, so the scan doesn't bring them back.
+#[test]
+fn false_faces_are_removed_in_one_undo_step() {
+    let d = temp("removemany");
+    let (mut s, _) = setup(&d, 64);
+    let (a, b) = two_photos(&s);
+    let pet = Region { kind: RegionKind::Pet, ..region(0.7, None) };
+    set_regions(&mut s, a, vec![region(0.1, None), region(0.4, Some("Ann")), pet.clone()]);
+    set_regions(&mut s, b, vec![region(0.3, None)]);
+    let undo = s.undo.len();
+    let regions = |s: &Session, id: PhotoId| s.catalog.photo(id).unwrap().meta.regions.clone();
+    // index 2 of `a` is a pet, not a face: it stays
+    let r = s
+        .execute(
+            "faces.removeFaces",
+            &json!({"faces": [{"photo": a.0, "index": 0}, {"photo": a.0, "index": 2}, {"photo": b.0, "index": 0}, {"photo": b.0, "index": 0}]}),
+        )
+        .unwrap();
+    assert_eq!((r["removed"].clone(), r["photos"].clone()), (json!(2), json!(2)));
+    assert_eq!(s.undo.len(), undo + 1, "one step for them all");
+    assert_eq!(regions(&s, a), vec![region(0.4, Some("Ann")), pet.clone()], "the named face and the pet stay, in order");
+    assert!(regions(&s, b).is_empty());
+    assert!(s.faces.scanned.contains(b.0), "a photo left without faces is not searched again");
+    assert!(!s.faces.scanned.contains(a.0), "one that still has a face needs no mark");
+    let unnamed = s.execute("faces.unnamed", &json!({})).unwrap();
+    assert_eq!(unnamed["total"], 0, "{unnamed}");
+    // undo puts them back together
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(regions(&s, a).len(), 3);
+    assert_eq!(regions(&s, b), vec![region(0.3, None)]);
+    // faces that are not there are skipped; with none left it is an error
+    for bad in [
+        json!({}),
+        json!({"faces": "x"}),
+        json!({"faces": [{"photo": a.0}]}),
+        json!({"faces": [{"photo": a.0, "index": 99}, {"photo": 987_654, "index": 0}]}),
+        json!({"faces": [{"photo": a.0, "index": 2}]}),
+        json!({"faces": vec![json!({"photo": a.0, "index": 0}); 5001]}),
+    ] {
+        assert!(s.execute("faces.removeFaces", &bad).is_err(), "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn unnamed_faces_come_with_look_alikes_together_and_the_name_the_named_ones_suggest() {
     let d = temp("unnamed");

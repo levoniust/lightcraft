@@ -35,26 +35,31 @@ fn apply_name(region: &mut lightcraft_meta::Region, name: &Option<String>) {
     }
 }
 
-/// `faces.nameFaces {faces: [{photo, index}], name}`: name (or clear) many face regions at once, as one undo step: what
-/// naming a group of look-alikes does.
-fn name_faces(s: &mut Session, p: &Value) -> Result<Value> {
-    const C: &str = "faces.nameFaces";
-    let name = name_param(p, C)?;
-    let list = p.get("faces").and_then(Value::as_array).ok_or_else(|| bad(C, "missing `faces`"))?;
+/// The `faces` parameter of the commands that act on many faces: `[{photo, index}]`, grouped by photo.
+fn faces_param(p: &Value, c: &str) -> Result<std::collections::BTreeMap<u64, Vec<usize>>> {
+    let list = p.get("faces").and_then(Value::as_array).ok_or_else(|| bad(c, "missing `faces`"))?;
     if list.len() > 5000 {
-        return Err(bad(C, "at most 5000 faces at a time"));
+        return Err(bad(c, "at most 5000 faces at a time"));
     }
     let mut by_photo: std::collections::BTreeMap<u64, Vec<usize>> = std::collections::BTreeMap::new();
     for f in list {
         let (Some(photo), Some(index)) =
             (f.get("photo").and_then(Value::as_u64), f.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()))
         else {
-            return Err(bad(C, "each face needs a `photo` and an `index`"));
+            return Err(bad(c, "each face needs a `photo` and an `index`"));
         };
         by_photo.entry(photo).or_default().push(index);
     }
+    Ok(by_photo)
+}
+
+/// `faces.nameFaces {faces: [{photo, index}], name}`: name (or clear) many face regions at once, as one undo step: what
+/// naming a group of look-alikes does.
+fn name_faces(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "faces.nameFaces";
+    let name = name_param(p, C)?;
     let (mut ops, mut named) = (Vec::new(), 0usize);
-    for (photo, indexes) in by_photo {
+    for (photo, indexes) in faces_param(p, C)? {
         let id = lightcraft_catalog::PhotoId(photo);
         let Some(photo) = s.catalog.photo(id) else { continue };
         let mut meta = photo.meta.clone();
@@ -76,6 +81,44 @@ fn name_faces(s: &mut Session, p: &Value) -> Result<Value> {
     s.commit(if name.is_some() { "Name Faces" } else { "Clear Face Names" }, Op::Batch { ops })?;
     s.skip_auto_write = true;
     Ok(json!({"named": named, "photos": photos, "name": name}))
+}
+
+/// `faces.removeFaces {faces: [{photo, index}]}`: take many face boxes off their photos at once, as one undo step: what
+/// rejecting false detections in Unnamed faces does (issue #2019). Only face regions go. Like `photo.removeRegion` it is
+/// catalog-only (reading the metadata from the file brings back a box that came from it), and a photo left with no face
+/// box is not searched for faces again, so the background scan doesn't put back what was just removed.
+fn remove_faces(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "faces.removeFaces";
+    let (mut ops, mut removed, mut emptied) = (Vec::new(), 0usize, Vec::new());
+    for (photo, mut indexes) in faces_param(p, C)? {
+        let id = lightcraft_catalog::PhotoId(photo);
+        let Some(photo) = s.catalog.photo(id) else { continue };
+        let mut meta = photo.meta.clone();
+        indexes.sort_unstable();
+        indexes.dedup();
+        let before = removed;
+        // from the last, so the indexes still to go keep pointing at the same regions
+        for i in indexes.into_iter().rev() {
+            if meta.regions.get(i).is_some_and(|r| r.kind == lightcraft_meta::RegionKind::Face) {
+                meta.regions.remove(i);
+                removed += 1;
+            }
+        }
+        if removed > before {
+            if !meta.regions.iter().any(|r| r.kind == lightcraft_meta::RegionKind::Face) {
+                emptied.push(id.0);
+            }
+            ops.push(Op::SetMeta { id, meta: Box::new(meta) });
+        }
+    }
+    if ops.is_empty() {
+        return Err(bad(C, "none of those faces exist"));
+    }
+    let photos = ops.len();
+    s.commit(if removed == 1 { "Remove Face Box" } else { "Remove Face Boxes" }, Op::Batch { ops })?;
+    s.skip_auto_write = true;
+    imp::searched(s, &emptied);
+    Ok(json!({"removed": removed, "photos": photos}))
 }
 
 /// `faces.setName {id?, index, name}`: name (or, with `null` or an empty name, un-name) one face region. Naming
@@ -780,6 +823,14 @@ mod imp {
         order
     }
 
+    /// Remember `photos` as searched for faces (saved with the rest by the next `faces.pump`), so the background scan
+    /// leaves them alone.
+    pub fn searched(s: &mut Session, photos: &[u64]) {
+        for &photo in photos {
+            s.faces.scanned.insert(photo);
+        }
+    }
+
     /// Put the unnamed faces `all` in order of likeness (the ones already embedded; the rest follow in photo order) and
     /// find a name for those the named faces recognise, for the first `limit` of them.
     pub fn arrange_unnamed(s: &mut Session, all: &mut Vec<(u64, usize, Rect)>, limit: usize) -> super::Arranged {
@@ -1100,6 +1151,8 @@ mod imp {
         super::Similar { items: Vec::new(), ready: false, pending: 0 }
     }
 
+    pub fn searched(_: &mut Session, _: &[u64]) {}
+
     pub fn arrange_unnamed(_: &mut Session, _: &mut Vec<(u64, usize, lightcraft_geom::Rect)>, _: usize) -> super::Arranged {
         super::Arranged { ordered: false, ready: false, suggestions: Default::default() }
     }
@@ -1160,6 +1213,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{faces: [{photo, index}], name} → {named, photos} — name (or, with a null or empty name, clear) many face regions as one undoable step; the sidecar is not touched",
             super::always,
             name_faces
+        ),
+        cmd!(
+            "faces.removeFaces",
+            "Remove Face Boxes",
+            [],
+            None,
+            "{faces: [{photo, index}]} → {removed, photos} — remove many face boxes (false detections) as one undoable step; only face regions go, the sidecar is not touched, and a photo left with no face box is not searched for faces again",
+            super::always,
+            remove_faces
         ),
         cmd!(
             query "faces.person",
