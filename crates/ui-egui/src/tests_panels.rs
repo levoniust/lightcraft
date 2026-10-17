@@ -1760,6 +1760,110 @@ fn a_folder_menu_locates_its_missing_tree_only() {
     assert!(sources.contains(&format!("{old}/other/c.jpg")), "another missing folder stays untouched: {sources:?}");
 }
 
+/// Issue #2037: right-click a folder ▸ New Folder on Disk… with "Include selected photos" ticked
+/// creates the folder and moves the selected photos into it, as Lightroom Classic's Create Folder
+/// does; left unticked (the default) it only creates the folder. Undo moves the photos back, a
+/// second Undo removes the folder.
+#[test]
+fn a_new_folder_on_disk_can_take_the_selected_photos() {
+    use crate::state::Dialog;
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let base = std::env::temp_dir().join(format!("lc-ui-new-folder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let _cleanup = Cleanup(base.clone());
+    let trip = base.join("pics/trip");
+    std::fs::create_dir_all(&trip).unwrap();
+    for f in ["a.jpg", "b.jpg", "c.jpg"] {
+        std::fs::write(trip.join(f), b"photo").unwrap();
+    }
+    // the folder tree writes paths with forward slashes, and its widget ids carry them
+    let b = base.to_string_lossy().replace('\\', "/");
+    let paths: Vec<String> = ["a", "b", "c"].iter().map(|f| format!("{b}/pics/trip/{f}.jpg")).collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let png = |img: &lightcraft_raster::Rgba8| {
+        lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(img), &lightcraft_codecs::EncodeMeta::default()).unwrap_or_default()
+    };
+    let services = Services {
+        png: Some(Box::new(png)),
+        write: Some(Box::new(|p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string()))),
+        ..Default::default()
+    };
+    let mut h = folders_app_with_services(&refs, [1400.0, 900.0], services);
+    h.app.session.source = lightcraft_engine::LibrarySource::LibraryFolder;
+    h.app.session.library_folder = Some(format!("{b}/pics/trip"));
+    h.step();
+    h.step();
+    let id_of = |h: &Headless, name: &str| {
+        h.app
+            .session
+            .catalog
+            .photos()
+            .find(|p| matches!(&p.source, lightcraft_catalog::Source::File { path } if path.ends_with(name)))
+            .map(|p| p.id.0)
+            .unwrap()
+    };
+    let (a, bb) = (id_of(&h, "a.jpg"), id_of(&h, "b.jpg"));
+    h.app.session.execute("library.select", &json!({"ids": [a, bb]})).unwrap();
+    let new_folder = |h: &mut Headless, name: &str, include: bool| {
+        right_click(h, &format!("source:libfolder:{b}/pics/trip"));
+        click(h, "folderNewOnDisk");
+        let Some(Dialog::NewDiskFolder { name: typed, include_selected, .. }) = &mut h.app.ui.dialog else {
+            panic!("New Folder on Disk… opened {:?}", h.app.ui.dialog)
+        };
+        assert!(!*include_selected, "it moves files on disk: off until ticked");
+        *typed = name.into();
+        h.step();
+        assert!(has(h, "check:folderIncludeSelected"), "the option is offered with a selection");
+        if include {
+            click(h, "check:folderIncludeSelected");
+            if let Some(p) = std::env::var_os("LIGHTCRAFT_TEST_SHOTS") {
+                let r = h.request(
+                    "ui.screenshot",
+                    json!({"path": std::path::Path::new(&p).join("new-folder.png").to_string_lossy(), "headless": true}),
+                    T,
+                );
+                assert_eq!(r["ok"], true, "{r}");
+            }
+        }
+        click(h, "button:dialogOk");
+        assert_eq!(h.app.ui.dialog, None);
+    };
+    let file_of = |h: &Headless, id: u64| match &h.app.session.catalog.photo(lightcraft_catalog::PhotoId(id)).unwrap().source {
+        lightcraft_catalog::Source::File { path } => std::path::PathBuf::from(path),
+        other => panic!("{other:?}"),
+    };
+
+    // unticked: an empty folder
+    new_folder(&mut h, "Empty", false);
+    assert!(trip.join("Empty").is_dir());
+    assert_eq!(std::fs::read_dir(trip.join("Empty")).unwrap().count(), 0, "nothing moved");
+    assert_eq!(file_of(&h, a).parent(), Some(trip.as_path()));
+
+    // ticked: the selection moves in, the photo left out stays
+    new_folder(&mut h, "Picked", true);
+    let picked = trip.join("Picked");
+    assert!(picked.join("a.jpg").is_file() && picked.join("b.jpg").is_file(), "the selected files moved");
+    assert!(trip.join("c.jpg").is_file() && !trip.join("a.jpg").exists());
+    assert_eq!(file_of(&h, a), picked.join("a.jpg"), "the library follows the move");
+
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert!(trip.join("a.jpg").is_file() && trip.join("b.jpg").is_file(), "Undo moves them back");
+    assert!(picked.is_dir(), "the folder is still there");
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert!(!picked.exists(), "a second Undo removes it");
+
+    // nothing selected: no option
+    h.app.session.selection = lightcraft_engine::Selection { ids: vec![], active: None };
+    right_click(&mut h, &format!("source:libfolder:{b}/pics/trip"));
+    click(&mut h, "folderNewOnDisk");
+    assert!(!has(&h, "check:folderIncludeSelected"), "no selection, no option");
+}
+
 /// Right-click a folder ▸ Set Color Label ▸ a colour: the folder's row shows the label's dot (a
 /// row without a label shows none), and None takes it off again.
 #[test]

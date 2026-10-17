@@ -2042,14 +2042,14 @@ fn folder_menu_for_library(app: &mut LightcraftApp, resp: &egui::Response, n: &F
             }
             ui.close();
         }
-        if ui.button(crate::i18n::tr("New Folder on Disk…")).clicked() {
-            app.ui.dialog = Some(crate::state::Dialog::TextPrompt {
+        let r = ui.button(crate::i18n::tr("New Folder on Disk…"));
+        register(ui.ctx(), "folderNewOnDisk", r.rect);
+        if r.clicked() {
+            app.ui.dialog = Some(crate::state::Dialog::NewDiskFolder {
                 title: crate::i18n::tr_format!("New Folder in “{name}”", name = label),
-                hint: "Folder name (created on disk)".into(),
-                value: String::new(),
-                command: "folder.create".into(),
-                params: json!({"parent": path}),
-                key: "name".into(),
+                parent: path.to_string(),
+                name: String::new(),
+                include_selected: false,
             });
             ui.close();
         }
