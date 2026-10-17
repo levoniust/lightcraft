@@ -1634,6 +1634,81 @@ mod tests {
         assert_eq!((h.app.ui.view, h.app.ui.person_page.clone()), (ViewMode::People, None));
     }
 
+    /// Issue #2019: false detections leave Unnamed faces through the naming bar's Remove (every selected face, one undo
+    /// step) or a tile's right-click menu (that face alone, when it isn't selected); the rest of the selection still
+    /// names the same faces.
+    #[test]
+    fn false_faces_are_removed_from_unnamed_faces() {
+        use lightcraft_catalog::Op;
+        let mut h = demo([1400.0, 900.0]);
+        let t = Duration::from_secs(10);
+        let ids: Vec<_> = h.app.session.catalog.photos().map(|p| p.id).take(2).collect();
+        let face = |x: f64| lightcraft_meta::Region {
+            rect: lightcraft_geom::Rect { x0: x, y0: 0.2, x1: x + 0.2, y1: 0.55 },
+            kind: lightcraft_meta::RegionKind::Face,
+            name: None,
+            description: None,
+        };
+        for (id, regions) in [(ids[0], vec![face(0.1), face(0.4), face(0.7)]), (ids[1], vec![face(0.3)])] {
+            let mut meta = h.app.session.catalog.photo(id).unwrap().meta.clone();
+            meta.regions = regions;
+            h.app.session.commit("setup", Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+        }
+        h.request("engine.execute", json!({"command": "view.people"}), t);
+        h.settle(SETTLE);
+        h.step();
+        h.step();
+        let tiles = |h: &mut Headless| h.request("ui.widgets", json!({"filter": "unnamed-face:"}), t)["result"].as_array().map_or(0, Vec::len);
+        let rects = |h: &Headless, id: lightcraft_catalog::PhotoId| -> Vec<f64> {
+            h.app.session.catalog.photo(id).unwrap().meta.regions.iter().map(|r| r.rect.x0).collect()
+        };
+        let click = |h: &mut Headless, id: String, button: &str| {
+            let c = h.app.widgets.iter().find(|(w, _)| *w == id).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no widget {id}"));
+            let r = h.request("ui.click", json!({"x": c.x, "y": c.y, "button": button}), t);
+            assert_eq!(r["ok"], true, "{r}");
+            h.step();
+            h.step();
+        };
+        assert_eq!(tiles(&mut h), 4);
+        // select the first photo's last face and the second photo's face
+        click(&mut h, format!("unnamed-face:{}:2", ids[0].0), "left");
+        click(&mut h, format!("unnamed-face:{}:0", ids[1].0), "left");
+        assert_eq!(h.app.ui.unnamed_selected.len(), 2);
+        // right-click a face that is not selected: only it goes, and the selection follows its faces
+        click(&mut h, format!("unnamed-face:{}:0", ids[0].0), "right");
+        if let Some(p) = std::env::var_os("LIGHTCRAFT_TEST_SHOTS") {
+            let png = |img: &lightcraft_raster::Rgba8| {
+                lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(img), &lightcraft_codecs::EncodeMeta::default())
+                    .unwrap_or_default()
+            };
+            h.app.services.png = Some(Box::new(png));
+            h.app.services.write = Some(Box::new(|p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string())));
+            let r = h.request(
+                "ui.screenshot",
+                json!({"path": std::path::Path::new(&p).join("unnamed-remove.png").to_string_lossy(), "headless": true}),
+                t,
+            );
+            assert_eq!(r["ok"], true, "{r}");
+        }
+        click(&mut h, "unnamed:contextRemove".into(), "left");
+        assert_eq!(rects(&h, ids[0]), vec![0.4, 0.7]);
+        let want: std::collections::HashSet<(u64, usize)> = [(ids[0].0, 1), (ids[1].0, 0)].into_iter().collect();
+        assert_eq!(h.app.ui.unnamed_selected, want, "still the same two faces");
+        // the bar's Remove takes the whole selection, as one undo step
+        let undo = h.app.session.undo.len();
+        click(&mut h, "unnamed:remove".into(), "left");
+        assert_eq!((rects(&h, ids[0]), rects(&h, ids[1])), (vec![0.4], vec![]));
+        assert_eq!(h.app.session.undo.len(), undo + 1);
+        assert!(h.app.ui.unnamed_selected.is_empty());
+        h.settle(SETTLE);
+        h.step();
+        assert_eq!(tiles(&mut h), 1, "only the face left untouched is listed");
+        // undo gives them back
+        h.request("engine.execute", json!({"command": "edit.undo"}), t);
+        h.step();
+        assert_eq!((rects(&h, ids[0]), rects(&h, ids[1])), (vec![0.4, 0.7], vec![0.3]));
+    }
+
     /// The name field under the unnamed faces is a shared text field: right-click ▸ Paste puts the
     /// clipboard's name in, and Esc leaves the field and clears the selection, as Clear does.
     #[test]

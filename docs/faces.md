@@ -303,7 +303,10 @@ alike are next to each other (put in order by looking at every pair, for up to t
 the named ones recognise carries the name they suggest along its bottom edge; click that name to accept it for that face.
 To name a group: click faces to select them (Shift-click selects a range, **Select all** takes every one listed), type a
 name in the bar that appears (people already named complete as you type), press Enter: all of them are named at once, as
-one undo step. Selecting names nothing.
+one undo step. Selecting names nothing. A box that is not a face at all (a false detection) is removed with **Remove
+face box** in the same bar (every selected face, one undo step) or **Remove Face Box** in a face's right-click menu
+(`faces.removeFaces`). Like removing a box in the loupe it changes only the catalog, never the file, and a photo left
+with no face box is not searched again by the background scan; an explicit **Detect Faces** run may find it again.
 
 Right-click a person's card, or use **Rename Person…** on their page, to rename every face of that person in the library
 at once (`faces.renamePerson`). The name is matched the way the cards are grouped (trimmed, ignoring capitalization) and
@@ -376,7 +379,7 @@ reuses the pictures of its step instead of rendering every face again.
 
 All of this is reachable from the control channel, the CLI and MCP: `faces.models.list`, `faces.models.inspect {path}`,
 `faces.models.install {path, acknowledged: true, activate?}`, `faces.models.download {id, acknowledged: true}` (then `faces.models.downloads`, which also installs what has arrived, and `faces.models.downloadCancel {id}`), `faces.models.remove {id}`, `faces.models.select {id}`,
-`faces.enable {enabled?}`, `faces.detect {ids?, apply?}`, `faces.index {budgetMs?, ids?}`, `faces.pump` (what the app calls every frame), `faces.suggest {ids?, threshold?, margin?}`, `faces.person {name, more?}` (a person's faces and the unnamed faces that look like them), `faces.unnamed {limit?}` (every unnamed face, look-alikes together, with suggested names), `faces.setName {id?, index, name}`, `faces.nameFaces {faces: [{photo, index}], name}` (name many at once, one undo step), `faces.renamePerson {from, to, merge?}` (rename every in-library face of one person, or merge two when `merge` is true, one undo step) and `faces.evaluate`. `acknowledged` must be `true`: the caller has shown the user the terms and the user agreed. Installing makes the model the one in use and switches recognition on unless `activate` is `false`.
+`faces.enable {enabled?}`, `faces.detect {ids?, apply?}`, `faces.index {budgetMs?, ids?}`, `faces.pump` (what the app calls every frame), `faces.suggest {ids?, threshold?, margin?}`, `faces.person {name, more?}` (a person's faces and the unnamed faces that look like them), `faces.unnamed {limit?}` (every unnamed face, look-alikes together, with suggested names), `faces.setName {id?, index, name}`, `faces.nameFaces {faces: [{photo, index}], name}` (name many at once, one undo step), `faces.removeFaces {faces: [{photo, index}]}` (remove many false face boxes at once, one undo step), `faces.renamePerson {from, to, merge?}` (rename every in-library face of one person, or merge two when `merge` is true, one undo step) and `faces.evaluate`. `acknowledged` must be `true`: the caller has shown the user the terms and the user agreed. Installing makes the model the one in use and switches recognition on unless `activate` is `false`.
 
 ## Find Blemishes
 

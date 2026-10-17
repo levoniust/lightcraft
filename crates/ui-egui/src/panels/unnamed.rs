@@ -1,9 +1,11 @@
 //! The unnamed faces in the People view: every face nobody has named, as cropped pictures, with look-alikes next to each
 //! other (once recognition has looked at them). Click faces to select them (Shift-click selects a range), type a name in
 //! the bar above, press Enter: they are all named at once, in one undo step. A face the named ones recognise carries the
-//! name they suggest; clicking that name accepts it for that face alone.
+//! name they suggest; clicking that name accepts it for that face alone. A false detection is removed with the bar's
+//! Remove button or a tile's right-click menu (issue #2019).
 //!
-//! The engine does the looking (`faces.unnamed`) and the naming (`faces.nameFaces`); this draws and selects.
+//! The engine does the looking (`faces.unnamed`), the naming (`faces.nameFaces`) and the removing (`faces.removeFaces`);
+//! this draws and selects.
 
 use std::sync::Arc;
 
@@ -104,6 +106,28 @@ fn name(app: &mut LightcraftApp, faces: &[(u64, usize)], name: &str) {
     let _ = app.run("faces.nameFaces", json!({"faces": list, "name": name}));
 }
 
+/// Remove the boxes of `faces` (photo, region) from their photos, as one undo step: they were not faces. The selection
+/// left behind follows the regions it named, whose places in their photos move up.
+fn remove(app: &mut LightcraftApp, ctx: &egui::Context, faces: &[(u64, usize)]) {
+    let list: Vec<Value> = faces.iter().map(|(photo, index)| json!({"photo": photo, "index": index})).collect();
+    if let Err(e) = app.run("faces.removeFaces", json!({"faces": list})) {
+        app.toast(ctx, e);
+        return;
+    }
+    app.ui.unnamed_selected = after_removal(&app.ui.unnamed_selected, faces);
+    app.ui.unnamed_anchor = None;
+}
+
+/// `selected` once the regions `removed` are gone from their photos: those leave it, and a later region of the same photo
+/// is one place earlier for each removed before it.
+fn after_removal(selected: &std::collections::HashSet<(u64, usize)>, removed: &[(u64, usize)]) -> std::collections::HashSet<(u64, usize)> {
+    selected
+        .iter()
+        .filter(|key| !removed.contains(key))
+        .map(|&(photo, index)| (photo, index.saturating_sub(removed.iter().filter(|&&(p, i)| p == photo && i < index).count())))
+        .collect()
+}
+
 /// The bar above the faces while some are selected: how many, a box to name them all, and the people already named.
 pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     if app.ui.unnamed_selected.is_empty() {
@@ -126,7 +150,7 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         })
     };
     let mut submit: Option<String> = None;
-    let mut clear = false;
+    let (mut clear, mut remove_them) = (false, false);
     ui.horizontal(|ui| {
         ui.add_space(super::people::PAD - 4.0);
         let n = selected.len();
@@ -151,6 +175,15 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let c = ui.button(crate::i18n::tr("Clear"));
         register(ui.ctx(), "unnamed:clear", c.rect);
         clear = c.clicked() || field.cancelled();
+        // false detections: not faces at all
+        let (label, tip) = if n == 1 {
+            ("Remove face box".to_string(), crate::i18n::tr("Remove this face box (undo with Edit ▸ Undo)").to_string())
+        } else {
+            (format!("Remove {n} face boxes"), "Remove these face boxes: they are not faces (undo with Edit ▸ Undo)".to_string())
+        };
+        let r = ui.button(label).on_hover_text(tip);
+        register(ui.ctx(), "unnamed:remove", r.rect);
+        remove_them = r.clicked();
     });
     // the people already named, matching what is typed (a click names the faces)
     let typed = app.ui.unnamed_name.trim().to_lowercase();
@@ -175,6 +208,9 @@ pub fn naming_bar(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         app.ui.unnamed_selected.clear();
         app.ui.unnamed_name.clear();
         app.ui.unnamed_anchor = None;
+    } else if remove_them {
+        remove(app, ui.ctx(), &selected);
+        app.ui.unnamed_name.clear();
     } else if clear {
         app.ui.unnamed_selected.clear();
         app.ui.unnamed_name.clear();
@@ -267,6 +303,28 @@ pub fn tile(app: &mut LightcraftApp, ui: &mut egui::Ui, list: &Unnamed, i: usize
         name(app, &[key], who);
         return;
     }
+    // right-click: remove the box (the selection's, when this face is one of it), for a false detection
+    let mut dropped = false;
+    resp.context_menu(|ui| {
+        let faces: Vec<(u64, usize)> = if selected {
+            let mut v: Vec<_> = app.ui.unnamed_selected.iter().copied().collect();
+            v.sort_unstable();
+            v
+        } else {
+            vec![key]
+        };
+        let label = if faces.len() == 1 { crate::i18n::tr("Remove Face Box").to_string() } else { format!("Remove {} Face Boxes", faces.len()) };
+        let r = ui.button(label);
+        register(ui.ctx(), "unnamed:contextRemove", r.rect);
+        if r.clicked() {
+            remove(app, ui.ctx(), &faces);
+            dropped = true;
+            ui.close();
+        }
+    });
+    if dropped {
+        return;
+    }
     // a double click opens the photo, as in the grid; its second click must not undo the first one's selection
     if resp.double_clicked() {
         let _ = app.run("library.select", json!({"ids": [f.photo], "active": f.photo}));
@@ -282,6 +340,14 @@ pub fn tile(app: &mut LightcraftApp, ui: &mut egui::Ui, list: &Unnamed, i: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selection_follows_its_faces_when_others_are_removed() {
+        let selected: std::collections::HashSet<(u64, usize)> = [(1, 0), (1, 2), (1, 4), (2, 1), (3, 0)].into_iter().collect();
+        let left = after_removal(&selected, &[(1, 1), (1, 2), (2, 0)]);
+        let want: std::collections::HashSet<(u64, usize)> = [(1, 0), (1, 2), (2, 0), (3, 0)].into_iter().collect();
+        assert_eq!(left, want);
+    }
 
     #[test]
     fn the_engines_answer_becomes_a_list_and_odd_entries_are_left_out() {
